@@ -1,19 +1,32 @@
 #include <WiFi.h>
+#include "time.h"
+#include <PubSubClient.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
 
 // Your GPRS credentials (leave empty, if not needed)
-const char apn[]      = "AXIS"; // APN (example: internet.vodafone.pt) use https://wiki.apnchanger.org
-const char gprsUser[] = "axis"; // GPRS User
-const char gprsPass[] = "123456"; // GPRS Password
+const char apn[]        = "AXIS";   // APN
+const char gprsUser[]   = "axis";   // GPRS User
+const char gprsPass[]   = "123456"; // GPRS Password
 
 // Server details
 // The server variable can be just a domain name or it can have a subdomain. It depends on the service you are using
-const char server[] = "hairdresser.cloudmqtt.com";    // domain name: example.com, maker.ifttt.com, etc
-const int  port = 18848;                              // server port number
+const char mqttServer[] = "hairdresser.cloudmqtt.com";        // MQTT broker
+const char mqttUser[]   = "nglettrq";
+const char mqttPwd[]    = "RVPcR2AQJEV1";
+const char ntpServer[]  = "pool.ntp.org";                     // server to synchronize time
+String deviceId         = "ADLDev-1";
+String pubTopic         = String(deviceId + "/relayStatus");
+String subTopic         = String(deviceId + "/relayControl");
+String deviceMac        = "2286179853734245";
+const int  mqttPort     = 18848;                              // server port number
 
 // SIM800L Modem Pins
-#define MODEM_RST            5
-#define MODEM_TX             17
-#define MODEM_RX             16
+#define MODEM_RST       5
+#define MODEM_TX        17
+#define MODEM_RX        16
+
+#define PERIOD          50000
 
 // Set serial for debug console (to Serial Monitor, default speed 115200)
 #define SerialMon Serial
@@ -24,25 +37,27 @@ const int  port = 18848;                              // server port number
 #define TINY_GSM_MODEM_SIM800      // Modem is SIM800
 #define TINY_GSM_RX_BUFFER   1024  // Set RX buffer to 1Kb
 
-// Define the serial console for debug prints, if needed
-//#define DUMP_AT_COMMANDS
-
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
 
-#ifdef DUMP_AT_COMMANDS
-  #include <StreamDebugger.h>
-  StreamDebugger debugger(SerialAT, SerialMon);
-  TinyGsm modem(debugger);
-#else
-  TinyGsm modem(SerialAT);
-#endif
+TinyGsm modem(SerialAT);
 
 // TinyGSM Client for Internet connection
 TinyGsmClient client(modem);
 PubSubClient mqtt(client);
 
-unsigned int last_request = 0;
+char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+const long utcOffsetInSeconds = 0;
+unsigned long relayStatus = 0;
+unsigned long epochTime = 0;
+unsigned long lastRequest = 0;
+String request = "relay on\r\n";
+String relayString = "";
+String inputString = "";
+bool stringComplete = false;
+
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, ntpServer, utcOffsetInSeconds);
 
 void setup() {
   // Set serial monitor debugging window baud rate to 115200
@@ -74,28 +89,53 @@ void setup() {
     SerialMon.println("Network connected");
   }
 
-  mqtt.setServer(server, port);
+  mqtt.setServer(mqttServer, mqttPort);
   mqtt.setCallback(mqttCallback);
+
+  timeClient.begin();
 }
 
 void loop() {
-  if (millis() - last_request > 50000) {
+  if (millis() - lastRequest > 50000) {
     SerialMon.print("Connecting to ");
-    SerialMon.print(server);
+    SerialMon.print(mqttServer);
 
     // Connect to MQTT Broker
-    boolean status = mqtt.connect("ADLDev-1", "nglettrq", "RVPcR2AQJEV1");
+    boolean status = mqtt.connect(deviceId.c_str(), mqttUser, mqttPwd);
 
     if (status == false) {
       SerialMon.println(" fail");
     } else {
       SerialMon.println(" OK");
+
+      print_local_time();
+      send_event();
     }
     
-    last_request = millis();
+    lastRequest = millis();
   }
 
   mqtt.loop();
+}
+
+void print_local_time()
+{
+  timeClient.update();
+
+  Serial.print(daysOfTheWeek[timeClient.getDay()]);
+  Serial.print(", ");
+  Serial.print(timeClient.getHours());
+  Serial.print(":");
+  Serial.print(timeClient.getMinutes());
+  Serial.print(":");
+  Serial.println(timeClient.getSeconds());
+
+  epochTime = timeClient.getEpochTime();
+}
+
+void publish_message(const char* message){
+  mqtt.publish(pubTopic.c_str(), message);
+  Serial.println("Event published...");  
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
@@ -104,11 +144,41 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   SerialMon.print("]: ");
   SerialMon.write(payload, len);
   SerialMon.println();
+}
 
-  // Only proceed if incoming message's topic matches
-//  if (String(topic) == topicLed) {
-//    ledStatus = !ledStatus;
-//    digitalWrite(LED_PIN, ledStatus);
-//    mqtt.publish(topicLedStatus, ledStatus ? "1" : "0");
-//  }
+//====================================================================================================================================================================  
+void send_event(){
+  char msgToSend[1024] = {0};
+  char relay[2];
+  char epochMil[32];
+  char deviceSerial[32];
+
+  String sepoch = String(epochTime);
+  sepoch.toCharArray(epochMil, sizeof(epochMil));
+  deviceMac.toCharArray(deviceSerial, sizeof(deviceSerial));
+  dtostrf(relayStatus, 1, 0, relay);
+
+  strcat(msgToSend, "{\"eventName\":\"relayStatus\",\"status\":\"none\"");
+  strcat(msgToSend, ",\"relay\":");
+  strcat(msgToSend, relay);
+  strcat(msgToSend, ",\"time\":");
+  strcat(msgToSend, epochMil);
+  strcat(msgToSend, ",\"mac\":\"");
+  strcat(msgToSend, deviceSerial);
+  strcat(msgToSend, "\"}");
+  publish_message(msgToSend);  //send the event to backend
+  memset(msgToSend, 0, sizeof msgToSend);
+}
+//====================================================================================================================================================================
+//==================================================================================================================================================================== 
+void do_actions(const char* message){
+  Serial.println(message);
+  // Check if received command whether 'relay_on'or 'relay_off
+  if (strcmp(message, "relay_on") == 0) {
+    //Send command to Arduino to turn on relay
+  } else if (strcmp(message, "relay_off") == 0) {
+    //Send command to Arduino to turn off relay
+  } else {
+    Serial.println("Command is not recognized");
+  }
 }
