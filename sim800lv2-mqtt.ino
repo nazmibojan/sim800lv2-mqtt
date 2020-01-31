@@ -1,8 +1,6 @@
 #include <WiFi.h>
 #include "time.h"
 #include <PubSubClient.h>
-#include <NTPClient.h>
-#include <WiFiUdp.h>
 
 // Your GPRS credentials (leave empty, if not needed)
 const char apn[]        = "AXIS";   // APN
@@ -14,7 +12,6 @@ const char gprsPass[]   = "123456"; // GPRS Password
 const char mqttServer[] = "hairdresser.cloudmqtt.com";        // MQTT broker
 const char mqttUser[]   = "nglettrq";
 const char mqttPwd[]    = "RVPcR2AQJEV1";
-const char ntpServer[]  = "pool.ntp.org";                     // server to synchronize time
 String deviceId         = "ADLDev-1";
 String pubTopic         = String(deviceId + "/relayStatus");
 String subTopic         = String(deviceId + "/relayControl");
@@ -46,18 +43,14 @@ TinyGsm modem(SerialAT);
 TinyGsmClient client(modem);
 PubSubClient mqtt(client);
 
-char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-const long utcOffsetInSeconds = 0;
 unsigned long relayStatus = 0;
-unsigned long epochTime = 0;
 unsigned long lastRequest = 0;
 String request = "relay on\r\n";
 String relayString = "";
 String inputString = "";
+String timeString = "";
 bool stringComplete = false;
-
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, ntpServer, utcOffsetInSeconds);
+char c;
 
 void setup() {
   // Set serial monitor debugging window baud rate to 115200
@@ -74,7 +67,12 @@ void setup() {
   // Restart SIM800 module, it takes quite some time
   // To skip it, call init() instead of restart()
   SerialMon.println("Initializing modem...");
-  modem.restart();
+  if(!modem.restart()) {
+    Serial.println("Modem failed to restart");
+  } else {
+    Serial.println("Modem successfully restart");
+    print_local_time();
+  }
 
   SerialMon.print("Connecting to APN: ");
   SerialMon.print(apn);
@@ -91,8 +89,6 @@ void setup() {
 
   mqtt.setServer(mqttServer, mqttPort);
   mqtt.setCallback(mqttCallback);
-
-  timeClient.begin();
 }
 
 void loop() {
@@ -115,22 +111,21 @@ void loop() {
     lastRequest = millis();
   }
 
+  // Keep reading from SIM800 and send to Arduino Serial Monitor
+  if (Serial2.available()) {
+    c = Serial2.read();
+    Serial.write(c);
+  }
+
   mqtt.loop();
 }
 
 void print_local_time()
 {
-  timeClient.update();
+  timeString = modem.getGSMDateTime(DATE_FULL);
 
-  Serial.print(daysOfTheWeek[timeClient.getDay()]);
-  Serial.print(", ");
-  Serial.print(timeClient.getHours());
-  Serial.print(":");
-  Serial.print(timeClient.getMinutes());
-  Serial.print(":");
-  Serial.println(timeClient.getSeconds());
-
-  epochTime = timeClient.getEpochTime();
+  Serial.print("Current date: ");
+  Serial.println(timeString);
 }
 
 void publish_message(const char* message){
@@ -150,22 +145,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
 void send_event(){
   char msgToSend[1024] = {0};
   char relay[2];
-  char epochMil[32];
+  char timeChar[32];
   char deviceSerial[32];
 
-  String sepoch = String(epochTime);
-  sepoch.toCharArray(epochMil, sizeof(epochMil));
+  timeString.toCharArray(timeChar, sizeof(timeChar));
   deviceMac.toCharArray(deviceSerial, sizeof(deviceSerial));
   dtostrf(relayStatus, 1, 0, relay);
 
   strcat(msgToSend, "{\"eventName\":\"relayStatus\",\"status\":\"none\"");
   strcat(msgToSend, ",\"relay\":");
   strcat(msgToSend, relay);
-  strcat(msgToSend, ",\"time\":");
-  strcat(msgToSend, epochMil);
-  strcat(msgToSend, ",\"mac\":\"");
+  strcat(msgToSend, ",\"time\":\"");
+  strcat(msgToSend, timeChar);
+  strcat(msgToSend, "\",\"mac\":\"");
   strcat(msgToSend, deviceSerial);
   strcat(msgToSend, "\"}");
+
   publish_message(msgToSend);  //send the event to backend
   memset(msgToSend, 0, sizeof msgToSend);
 }
