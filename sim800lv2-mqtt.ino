@@ -2,6 +2,8 @@
 #include "time.h"
 #include <PubSubClient.h>
 
+//#define CLOUD_MQTT
+
 // Your GPRS credentials (leave empty, if not needed)
 const char apn[]        = "AXIS";   // APN
 const char gprsUser[]   = "axis";   // GPRS User
@@ -9,14 +11,25 @@ const char gprsPass[]   = "123456"; // GPRS Password
 
 // Server details
 // The server variable can be just a domain name or it can have a subdomain. It depends on the service you are using
-const char mqttServer[] = "hairdresser.cloudmqtt.com";        // MQTT broker
+#ifdef CLOUD_MQTT
+const char mqttServer[] = "hairdresser.cloudmqtt.com";                                        // MQTT broker
 const char mqttUser[]   = "nglettrq";
 const char mqttPwd[]    = "RVPcR2AQJEV1";
 String deviceId         = "ADLDev-1";
+String deviceMac        = "2286179853734245";
 String pubTopic         = String(deviceId + "/relayStatus");
 String subTopic         = String(deviceId + "/relayControl");
-String deviceMac        = "2286179853734245";
-const int  mqttPort     = 18848;                              // server port number
+const int  mqttPort     = 18848;                                                              // server port number
+#else
+const char mqttServer[] = "mqtt.flexiot.xl.co.id";                                            // MQTT broker
+const char mqttUser[]   = "generic_brand_2003-esp32_test-v2_3792";
+const char mqttPwd[]    = "1579159694_3792";
+String deviceId         = "ADLDev-1";
+String deviceMac        = "1115779741800352";
+String pubTopic         = String("generic_brand_2003/esp32_test/v2/common");
+String subTopic         = String("+/" + deviceMac + "/generic_brand_2003/esp32_test/v2/sub");
+const int  mqttPort     = 1883;                                                               // server port number
+#endif
 
 // SIM800L Modem Pins
 #define MODEM_RST       5
@@ -44,7 +57,7 @@ TinyGsmClient client(modem);
 PubSubClient mqtt(client);
 
 unsigned long relayStatus = 0;
-unsigned long lastRequest = 0;
+unsigned long lastRequest = 0, lastConnectionCheck = 0;
 String request = "relay on\r\n";
 String relayString = "";
 String inputString = "";
@@ -71,9 +84,48 @@ void setup() {
     Serial.println("Modem failed to restart");
   } else {
     Serial.println("Modem successfully restart");
-    print_local_time();
   }
 
+  gprsSetup();
+
+  mqtt.setServer(mqttServer, mqttPort);
+  mqtt.setCallback(mqttCallback);
+}
+
+void loop() {
+  if (millis() - lastConnectionCheck > 30000) {
+    // Check if GPRS connected
+    if (!modem.isGprsConnected()) {
+      Serial.println("GPRS did not connect. Try to connect...");
+      gprsSetup();
+    }
+  
+    if (modem.isGprsConnected() && !mqtt.connected()) {
+      reconnect();
+    }
+
+    lastConnectionCheck = millis();
+  }
+  
+  if (millis() - lastRequest > 50000) {
+    SerialMon.print("Connecting to ");
+    SerialMon.print(mqttServer);
+    SerialMon.println();
+
+    if (mqtt.connected()) {
+      print_local_time();
+      send_event();
+    } else {
+      Serial.println("Can not connect to MQTT...");
+    }
+    
+    lastRequest = millis();
+  }
+
+  mqtt.loop();
+}
+
+void gprsSetup() {
   SerialMon.print("Connecting to APN: ");
   SerialMon.print(apn);
   if (!modem.gprsConnect(apn, gprsUser, gprsPass)) {
@@ -86,38 +138,6 @@ void setup() {
   if (modem.isNetworkConnected()) {
     SerialMon.println("Network connected");
   }
-
-  mqtt.setServer(mqttServer, mqttPort);
-  mqtt.setCallback(mqttCallback);
-}
-
-void loop() {
-  if (millis() - lastRequest > 50000) {
-    SerialMon.print("Connecting to ");
-    SerialMon.print(mqttServer);
-
-    // Connect to MQTT Broker
-    boolean status = mqtt.connect(deviceId.c_str(), mqttUser, mqttPwd);
-
-    if (status == false) {
-      SerialMon.println(" fail");
-    } else {
-      SerialMon.println(" OK");
-
-      print_local_time();
-      send_event();
-    }
-    
-    lastRequest = millis();
-  }
-
-  // Keep reading from SIM800 and send to Arduino Serial Monitor
-  if (Serial2.available()) {
-    c = Serial2.read();
-    Serial.write(c);
-  }
-
-  mqtt.loop();
 }
 
 void print_local_time()
@@ -134,11 +154,32 @@ void publish_message(const char* message){
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
+  char msg[300] = {0};
+  
   SerialMon.print("Message arrived [");
   SerialMon.print(topic);
   SerialMon.print("]: ");
-  SerialMon.write(payload, len);
-  SerialMon.println();
+  for (int i = 0; i < len; i++) {
+    msg[i] = (char)payload[i];
+  }
+  do_actions(msg);
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  Serial.print("Attempting MQTT connection...");
+  // Attempt to connect
+  if (mqtt.connect(deviceId.c_str(), mqttUser, mqttPwd)) {
+    Serial.println("connected");
+    //subscribe to the topic
+    mqtt.subscribe(subTopic.c_str());
+  } else {
+    Serial.print("failed, rc=");
+    Serial.print(mqtt.state());
+    Serial.println(" try again in 5 seconds");
+    // Wait 5 seconds before retrying
+    delay(5000);
+  }
 }
 
 //====================================================================================================================================================================  
